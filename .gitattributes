@@ -1,0 +1,7 @@
+# Normalise line endings: the sources are LF, and this keeps them LF on Windows.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.webp binary
+*.tgz binary

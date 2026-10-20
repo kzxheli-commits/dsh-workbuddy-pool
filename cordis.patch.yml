@@ -1,0 +1,12 @@
+# Register the WorkBuddy pool provider.
+#
+# The plugin reads WorkBuddy sign-in material that already exists on this
+# machine (desktop app snapshots) and also accepts credentials imported from the
+# settings card, including the gateway's own QR sign-in. It starts no automatic
+# login flow: the QR flow only runs on an explicit click.
+#
+# Requests rotate across every usable account; the loopback shim is what the
+# Harness provider talks to.
+- insert:
+    - id: llm-workbuddy-pool
+      name: dsh-workbuddy-pool

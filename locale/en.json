@@ -1,0 +1,4 @@
+{
+  "title": "WorkBuddy Pool",
+  "description": "Merge local and imported WorkBuddy accounts into one failover model pool (OpenAI Chat, Responses and Anthropic Messages over one loopback endpoint)."
+}

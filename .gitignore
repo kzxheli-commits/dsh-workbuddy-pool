@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Packed artifacts
+*.tgz
+
+# Local runtime state (never commit credentials or logs)
+workbuddy-pool/
+.workbuddy-pool/
+*.log
+
+# OS noise
+Thumbs.db
+.DS_Store
+
+# Visual work products kept out of the repository
+assets/compare.png
+assets/directions.png
+assets/workbuddy-source.png

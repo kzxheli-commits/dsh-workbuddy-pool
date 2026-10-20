@@ -1,0 +1,4 @@
+{
+  "title": "WorkBuddy 积分池",
+  "description": "把本机与导入的 WorkBuddy 账号合并成一个自动故障转移的模型池，用同一个回环端点同时服务 OpenAI Chat、Responses 与 Anthropic Messages。"
+}
