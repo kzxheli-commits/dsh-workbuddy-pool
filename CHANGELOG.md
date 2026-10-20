@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.38
+
+### 按区域模拟官方客户端请求指纹（国际版单独一套）
+
+上一版只补了产品/追踪头，还不是官方客户端指纹。这版按两个网关各自的官方客户端分开做——它们本来就是不同产品：国内是 CodeBuddy IDE，国际是 WorkBuddy 桌面端，校验的字段也不同。
+
+- **国内（`copilot.tencent.com`）**：官方 CodeBuddy IDE 指纹——`CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0`、`x-ide-name/type/version`、`x-product-code` / `x-product-version` / `x-env-id`、`x-agent-intent`、`x-model-id`、`accept-language: *`、`sec-fetch-mode: cors`、`monitor_httpsendtime`、`x-request-trace-id`（uuid v4）。
+- **国际（`www.workbuddy.ai` / `www.codebuddy.ai`）**：官方 WorkBuddy 桌面客户端指纹——`workbuddy-ai/5.7.6 workbuddy-ai/5.7.6 CLI/2.156.0`、`x-ide-* = WorkBuddy`、`x-agent-intent/purpose/type`、`x-private-data`、`x-codebuddy-request`、`x-product: SaaS` 和整套 `x-stainless-*`；**不发**国内独有的 `x-product-code` / `x-product-version` / `x-env-id` / `x-model-id` / `x-request-trace-id` / `monitor_httpsendtime` / `accept-language` / `sec-fetch-mode`。实测：只带认证头访问国际 chat 必被拒（`400 + 11128 request illegal`），带上这套指纹即 200——之前国际账号"余额能查、聊天全拒"就是少了它。
+- **会话追踪链**：每轮带 `x-conversation-id`（按会话开头（system 首段 + 首条 user）哈希，整段会话稳定）、`x-conversation-message-id`、`x-conversation-request-id`、`x-request-id`、`x-root-request-id`、`x-b3-traceid/spanid/parentspanid/sampled`、`b3`、`traceparent`；官方国内版 `x-request-id = conversation-request-id`，国际版 `x-request-id = conversation-message-id`（抓包特性，按区域分支）。参考项目的复盘把"请求孤立、无链式 id"列为风控画像之一，所以链也一并模拟，父 span 按会话串起来。
+- **国际登录平台**：`/v2/plugin/auth/state?platform=` 按区域取 `workbuddy`（国内）/ `workbuddy-ai`（国际）；国际 token 刷新的 UA 也切到国际客户端。实测国际 refresh 可用且已把新 token 写回凭据文件。
+- **放缓重试**：provider 重试退避从 400 ms / 2 s 提到 900 ms / 5 s，带 20% 抖动——参考项目明确"禁止 <5 秒热重试"，这是插件唯一能控制重试节奏的地方。
+- 验证：真实网关下双区域 `chatStream` 均 200（国内余额 4180，国际余额 350，后者此前一律 11128）；离线套件 40 项（新增指纹差异与追踪链单测）、静态契约 23 项全过。
+
 ## 0.4.37
 
 ### 按 `workbuddy2api` 的请求处理加固上游调用

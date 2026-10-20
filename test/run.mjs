@@ -31,6 +31,7 @@ const { parseAuthDocument, discoverCredentials, workbuddyAccountId, regionOfCred
 const { WorkBuddyAccountPool } = await import("../lib/pool.js");
 const { WorkBuddyCatalog, FALLBACK_MODELS } = await import("../lib/catalog.js");
 const { createShim, repairToolPairs, sanitizeChatMessages, desensitizeSystemText } = await import("../lib/shim.js");
+const { conversationIdOf, fingerprintHeaders, resetFingerprintState } = await import("../lib/fingerprint.js");
 const protocol = await import("../lib/protocol.js");
 const automation = await import("../lib/automation.js");
 const atRest = await import("../lib/at-rest.js");
@@ -725,9 +726,54 @@ await test("sends the upstream a sanitized body with a string tool_choice", asyn
   assert.equal(lastChatBody.messages[1].content, "hi");
   // Official-client fingerprint headers travel with every chat call.
   assert.equal(lastChatBody.model, "glm-5.3");
-  assert.equal(lastChatHeaders["x-model-id"], "glm-5.3");
+  assert.match(String(lastChatHeaders["user-agent"]), /^CodeBuddyIDE\/4\.12\.0 CodeBuddy\/4\.12\.0$/u);
+  assert.equal(lastChatHeaders["x-ide-name"], "CodeBuddyIDE");
+  assert.equal(lastChatHeaders["x-ide-version"], "4.12.0");
   assert.equal(lastChatHeaders["x-product-code"], "codebuddy");
-  assert.match(String(lastChatHeaders["x-request-trace-id"]), /^[0-9a-f]{32}$/u);
+  assert.equal(lastChatHeaders["x-model-id"], "glm-5.3");
+  assert.match(String(lastChatHeaders["x-request-trace-id"]), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  assert.match(String(lastChatHeaders["x-conversation-id"]), /^[0-9a-f]{32}$/u);
+  assert.match(String(lastChatHeaders["x-b3-traceid"]), /^[0-9a-f]{32}$/u);
+});
+
+await test("keeps one trace chain per conversation and a fresh one for a new prompt", () => {
+  resetFingerprintState();
+  const messages = [
+    { role: "system", content: "You are an AI agent powered by DSH." },
+    { role: "user", content: "first question" },
+  ];
+  const conversationId = conversationIdOf(messages);
+  assert.match(conversationId, /^[0-9a-f]{32}$/u);
+  // Stable for the same opening, different for a different first user turn.
+  assert.equal(conversationIdOf(messages), conversationId);
+  assert.notEqual(conversationIdOf([messages[0], { role: "user", content: "another question" }]), conversationId);
+
+  const first = fingerprintHeaders({ region: "cn", model: "glm-5.3", conversationId });
+  const second = fingerprintHeaders({ region: "cn", model: "glm-5.3", conversationId });
+  assert.equal(first["x-conversation-id"], second["x-conversation-id"]);
+  assert.equal(first["x-b3-traceid"], second["x-b3-traceid"]);
+  // Each request gets its own span, and names the previous one as its parent.
+  assert.notEqual(first["x-b3-spanid"], second["x-b3-spanid"]);
+  assert.equal(second["x-b3-parentspanid"], first["x-b3-spanid"]);
+  // Per-request ids are fresh; the conversation id and trace id are not.
+  assert.notEqual(first["x-conversation-request-id"], second["x-conversation-request-id"]);
+  assert.equal(first["x-request-id"], first["x-conversation-request-id"]);
+});
+
+await test("intl and CN fingerprints are disjoint", () => {
+  const cn = fingerprintHeaders({ region: "cn", model: "glm-5.3", conversationId: "0".repeat(32) });
+  const global = fingerprintHeaders({ region: "global", model: "glm-5.3", conversationId: "0".repeat(32) });
+  assert.match(String(global["user-agent"]), /^workbuddy-ai\/5\.7\.6 workbuddy-ai\/5\.7\.6 CLI\/2\.156\.0$/u);
+  assert.equal(global["x-ide-name"], "WorkBuddy");
+  assert.equal(global["x-stainless-runtime"], "node");
+  // CN-only headers must not leak into the intl fingerprint.
+  for (const header of ["x-product-code", "x-product-version", "x-env-id", "x-model-id", "x-request-trace-id", "monitor_httpsendtime", "accept-language", "sec-fetch-mode"]) {
+    assert.equal(global[header], undefined, `intl fingerprint must not send ${header}`);
+  }
+  // Official intl ties x-request-id to the message id; CN ties it to the request id.
+  assert.equal(global["x-request-id"], global["x-conversation-message-id"]);
+  assert.equal(cn["x-request-id"], cn["x-conversation-request-id"]);
+  assert.match(String(cn["user-agent"]), /^CodeBuddyIDE\/4\.12\.0 CodeBuddy\/4\.12\.0$/u);
 });
 
 await test("gzips a large chat body and the upstream still reads it", async () => {
