@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.37
+
+### 按 `workbuddy2api` 的请求处理加固上游调用
+
+参考 [`Zhengyuuuui/workbuddy2api`](https://github.com/Zhengyuuuui/workbuddy2api)（Python 反代，带官方客户端 mitm 抓包与封禁复盘）的请求处理，对齐三处：
+
+- **脱敏改成零宽空格**：0.4.36 是把系统提示里的品牌句可见地改写成 `DSH`。按对方 `server/desensitize.py` 的做法，改为在词内部插入 U+200B 零宽空格——后端关键词匹配失效，模型读到的提示与原文视觉一致。实测：`You are an AI agent powered by D\u200beepSeek Harness.` → 200，原文 → 400/11128。只作用于 system 消息，其余角色一字不动，且幂等。
+- **官方客户端产品指纹头**：chat 请求补 `x-product-code` / `x-product-version` / `x-env-id` / `x-agent-intent` / `x-model-id` / `x-request-trace-id` / `monitor_httpsendtime`（取值参考对方 `official_ide_headers()`，源自官方客户端抓包）。对方复盘把封禁归因为「通道可识别 + 无设备指纹 + 机器行为画像」，这批头是其中成本最低的一半，实测真实网关全部接受。
+- **大 body gzip**：超过 4096 字节的 chat body 压缩后发送，对齐官方客户端；本次复现的长上下文请求是 586 KB，不再以未压缩明文出网。实测网关接受 gzip 且流式正常。
+- **刻意不跟的两处**：UA 与 `x-ide-*` 保持本通道写法——本插件走 CLI/plugin 通道（`/v2/plugin/auth/token/refresh`），拿 CLI 凭据冒充官方 IDE 是不可自洽的指纹；`x-conversation-id` 链也没做，因为插件拿不到稳定的 conversation id，伪造链式 id 反而更像机器流量。
+- 验证：真实上游重放那份 167 条消息的失败会话（经 `WorkBuddyClient.chatStream` 全链路）→ 200 且正常流式；离线套件 38 项（新增 gzip、指纹头断言）、客户端静态契约 23 项全过。
+
 ## 0.4.36
 
 ### 修复「Illegal API invocation from an unapproved channel」(code 11128)
@@ -7,7 +19,7 @@
 - **症状**：账号积分正常、余额查询与模型目录都通，但从某一刻起**每一轮对话的第一个请求**都返回 `400: all accounts failed: {"code":11128,"msg":"Illegal API invocation from an unapproved channel"…}`；同一时刻**会话标题请求**（另一套 system 提示）却成功，说明账号、token、链路都没坏。
 - **定位**：把失败会话按事件日志（`system/message`、`user/message`、`assistant/message`、`tool/result`）还原成完整的 OpenAI chat body 重放，前 2 条消息就复现；再对 41 KB 的 DSH 系统提示做二分，锁定触发器是系统提示开头那句品牌签名 `You are an AI agent powered by DeepSeek Harness.` —— 网关把一次**内容拦截**伪装成「渠道校验失败」，错误码与 `displayTips` 都是误导。
 - **实测边界**（对真实网关逐条验证）：同一句放在 user / assistant / tool 消息、工具描述里全部放行；`DeepSeek Harness` 单独出现、或换成 `DeepSeek` / `DSH` 都放行；只有系统提示里的那句精确签名才 400。
-- **修法**：`prepareChatBody` 新增 `sanitizeChatMessages`，只对 **system** 消息（含 `developer` 改名后的消息）把 `DeepSeek Harness`（大小写、多空格不敏感）改写为 `DSH`，其余角色的内容一字不动。
+- **修法**：`prepareChatBody` 新增 `sanitizeChatMessages`，只对 **system** 消息（含 `developer` 改名后的消息）把 `DeepSeek Harness`（大小写、多空格不敏感）改写为 `DSH`，其余角色的内容一字不动。（0.4.37 起改为不可见的零宽空格方案，见下。）
 - **顺带对齐参考实现**：对象形式的 `tool_choice`（`{type:"function",function:{name}}`）压平成函数名字符串 —— 网关的 Go 结构体把 `tool_choice` 声明为字符串，对象形式会 `cannot unmarshal object into … of type string` 报 11101；参考项目同样发字符串。
 - 验证：离线套件 37 项（新增 2 项：脱敏单测、经回环 shim 的端到端断言）、客户端静态契约 23 项全过；用真实上游重放失败会话的系统提示，脱敏后返回 200。
 

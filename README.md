@@ -115,7 +115,8 @@ dsh plugin --profile <profile> install
 - 上游 chat 永远是流式的，非流式请求由插件把 SSE 重组为完整响应；
 - 工具调用在 Chat / Responses / Anthropic 三套词表之间互译，`tool_use` ↔ `tool_calls`、`stop_reason: tool_use`、`input_json_delta` 都按各自协议发送；
 - `role: "developer"` 转 `system`、`tool_choice` 扁平化、`tool_calls`↔`tool` 结果配对修复后再发上游（上游对不配对的历史直接回 11148）；
-- **系统提示脱敏**：网关对系统提示里的竞品品牌句做内容拦截，却伪装成"渠道校验失败"返回 `400 + code 11128`。实测只有 system 消息里的 `DeepSeek Harness` 精确签名会被拦（user/assistant/tool 消息、工具描述都放行），插件发上游前把它改写成 `DSH`，代价是模型看到的产品名变短，换来不被误判成"非官方客户端"；
+- **系统提示脱敏**：网关对系统提示里的竞品品牌句做内容拦截，却伪装成"渠道校验失败"返回 `400 + code 11128`。实测只有 system 消息里的 `DeepSeek Harness` 精确签名会被拦（user/assistant/tool 消息、工具描述都放行）。按 [`workbuddy2api`](https://github.com/Zhengyuuuui/workbuddy2api) 的 `server/desensitize.py` 做法，在词内部插入 U+200B 零宽空格：后端关键词匹配失效，而模型读到的提示与原文视觉一致；
+- **请求指纹与压缩**（同样对齐 `workbuddy2api`）：chat 请求带 `x-product-code` / `x-product-version` / `x-env-id` / `x-agent-intent` / `x-model-id` / `x-request-trace-id` / `monitor_httpsendtime`，超过 4 KB 的 body 走 gzip。UA 与 `x-ide-*` 保持本通道（CLI/plugin）的写法，不冒充官方 IDE；
 - 错误归因诚实：池为空时报告是"限流 / 额度耗尽 / 全部停用 / 需要重新登录"中的哪一种，而不是一律 401。
 
 ## 安全
@@ -136,7 +137,7 @@ dsh plugin --profile <profile> install
 ## 验证
 
 ```bash
-node test/run.mjs                  # 37 项：池/协议/自动化/凭据（mock 上游 + 真实 HTTP）
+node test/run.mjs                  # 38 项：池/协议/自动化/凭据（mock 上游 + 真实 HTTP）
 node test/check-provider.mjs       #  5 项：真实 PiAiAdapter → shim 的适配器契约
 node test/check-client-static.mjs  # 23 项：词典/路由/主题令牌/Slot/可重复添加账号的静态校验
 ```

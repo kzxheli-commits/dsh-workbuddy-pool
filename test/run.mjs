@@ -16,6 +16,7 @@ import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 /* ------------------------------------------------------------------ *
  * Isolate plugin state into a temp DSH_HOME before importing modules that
@@ -29,7 +30,7 @@ const { WorkBuddyClient, classifyUpstreamError, parseRateLimitReset, readBusines
 const { parseAuthDocument, discoverCredentials, workbuddyAccountId, regionOfCredential, accountLabel } = await import("../lib/credentials.js");
 const { WorkBuddyAccountPool } = await import("../lib/pool.js");
 const { WorkBuddyCatalog, FALLBACK_MODELS } = await import("../lib/catalog.js");
-const { createShim, repairToolPairs, sanitizeChatMessages } = await import("../lib/shim.js");
+const { createShim, repairToolPairs, sanitizeChatMessages, desensitizeSystemText } = await import("../lib/shim.js");
 const protocol = await import("../lib/protocol.js");
 const automation = await import("../lib/automation.js");
 const atRest = await import("../lib/at-rest.js");
@@ -43,6 +44,7 @@ const store = await import("../lib/store.js");
 const hits = { chat: 0, models: 0, credits: 0, refresh: 0, automation: 0 };
 const perToken = new Map();
 let lastChatBody;
+let lastChatHeaders;
 let mock;
 
 function sse(res, frames, options = {}) {
@@ -56,7 +58,11 @@ function readBody(req) {
   return new Promise((resolve) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks);
+      // Large chat bodies arrive gzipped, exactly like the real upstream sees them.
+      resolve(req.headers["content-encoding"] === "gzip" ? gunzipSync(raw).toString("utf8") : raw.toString("utf8"));
+    });
   });
 }
 
@@ -76,6 +82,7 @@ const mockServer = createServer(async (req, res) => {
   if (path === "/v2/chat/completions") {
     hits.chat += 1;
     lastChatBody = parsedBody;
+    lastChatHeaders = req.headers;
     const count = (perToken.get(token) ?? 0) + 1;
     perToken.set(token, count);
     // Account A is rate-limited on its first two calls, then recovers.
@@ -669,7 +676,7 @@ await test("repairs tool-call/tool-result pairing", () => {
   assert.equal(repaired[0].role, "user");
 });
 
-await test("renames developer and redacts the harness phrase the gateway blocks", () => {
+await test("renames developer and desensitises the harness phrase the gateway blocks", () => {
   const sanitized = sanitizeChatMessages([
     { role: "developer", content: "You are an AI agent powered by DeepSeek Harness." },
     { role: "user", content: "explain DeepSeek Harness" },
@@ -677,12 +684,17 @@ await test("renames developer and redacts the harness phrase the gateway blocks"
     { role: "assistant", content: "DeepSeek Harness" },
   ]);
   assert.equal(sanitized[0].role, "system");
-  assert.equal(sanitized[0].content, "You are an AI agent powered by DSH.");
+  // The keyword match is broken by a zero-width space; the visible text is intact.
+  assert.equal(sanitized[0].content, "You are an AI agent powered by D\u200beepSeek Harness.");
+  assert.equal(sanitized[0].content.replace(/\u200b/gu, ""), "You are an AI agent powered by DeepSeek Harness.");
   // Only system messages are the gateway's target; conversation text is untouched.
   assert.equal(sanitized[1].content, "explain DeepSeek Harness");
-  assert.equal(sanitized[2].content[0].text, "The DSH checkout.");
+  assert.equal(sanitized[2].content[0].text.replace(/\u200b/gu, ""), "The DeepSeek  Harness checkout.");
+  assert.ok(sanitized[2].content[0].text.includes("\u200b"));
   assert.equal(sanitized[2].content[1].text, "unrelated");
   assert.equal(sanitized[3].content, "DeepSeek Harness");
+  // Idempotent: an already-desensitised text is left alone.
+  assert.equal(desensitizeSystemText(sanitized[0].content), sanitized[0].content);
 });
 
 await test("sends the upstream a sanitized body with a string tool_choice", async () => {
@@ -704,12 +716,40 @@ await test("sends the upstream a sanitized body with a string tool_choice", asyn
   assert.equal(response.status, 200);
   await response.json();
   assert.equal(lastChatBody.messages[0].role, "system");
-  assert.equal(lastChatBody.messages[0].content, "You are an AI agent powered by DSH.");
+  assert.equal(lastChatBody.messages[0].content.replace(/\u200b/gu, ""), "You are an AI agent powered by DeepSeek Harness.");
+  assert.ok(lastChatBody.messages[0].content.includes("\u200b"));
   // The gateway types `tool_choice` as a string; the object form is a 400.
   assert.equal(lastChatBody.tool_choice, "bash");
   assert.equal(lastChatBody.stream, true);
   // The loopback body the client sent is not mutated in place.
   assert.equal(lastChatBody.messages[1].content, "hi");
+  // Official-client fingerprint headers travel with every chat call.
+  assert.equal(lastChatBody.model, "glm-5.3");
+  assert.equal(lastChatHeaders["x-model-id"], "glm-5.3");
+  assert.equal(lastChatHeaders["x-product-code"], "codebuddy");
+  assert.match(String(lastChatHeaders["x-request-trace-id"]), /^[0-9a-f]{32}$/u);
+});
+
+await test("gzips a large chat body and the upstream still reads it", async () => {
+  shimFixture.pool.resetCooldowns();
+  const filler = "lorem ipsum dolor sit amet ".repeat(400);
+  const response = await fetch(`${shimFixture.base}/v1/chat/completions`, {
+    method: "POST",
+    headers: authHeaders,
+    body: JSON.stringify({
+      model: "glm-5.3",
+      stream: false,
+      messages: [
+        { role: "system", content: filler },
+        { role: "user", content: "hi" },
+      ],
+    }),
+  });
+  assert.equal(response.status, 200);
+  await response.json();
+  assert.equal(lastChatHeaders["content-encoding"], "gzip");
+  // The mock gunzips before parsing, so the body surviving proves it is readable.
+  assert.equal(lastChatBody.messages[0].content, filler);
 });
 
 await test("converts a Responses request into a chat body", () => {
