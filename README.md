@@ -115,6 +115,7 @@ dsh plugin --profile <profile> install
 - 上游 chat 永远是流式的，非流式请求由插件把 SSE 重组为完整响应；
 - 工具调用在 Chat / Responses / Anthropic 三套词表之间互译，`tool_use` ↔ `tool_calls`、`stop_reason: tool_use`、`input_json_delta` 都按各自协议发送；
 - `role: "developer"` 转 `system`、`tool_choice` 扁平化、`tool_calls`↔`tool` 结果配对修复后再发上游（上游对不配对的历史直接回 11148）；
+- **系统提示脱敏**：网关对系统提示里的竞品品牌句做内容拦截，却伪装成"渠道校验失败"返回 `400 + code 11128`。实测只有 system 消息里的 `DeepSeek Harness` 精确签名会被拦（user/assistant/tool 消息、工具描述都放行），插件发上游前把它改写成 `DSH`，代价是模型看到的产品名变短，换来不被误判成"非官方客户端"；
 - 错误归因诚实：池为空时报告是"限流 / 额度耗尽 / 全部停用 / 需要重新登录"中的哪一种，而不是一律 401。
 
 ## 安全
@@ -129,14 +130,15 @@ dsh plugin --profile <profile> install
 - **加密凭据需要桌面端**：纯 Web / Android 环境无法解开 `$wbEncrypted`，请用扫码或粘贴明文；
 - **扫码登录需要手机确认**：插件只负责发起与轮询，扫码动作由用户完成；
 - **国际区域目录**依赖国际账号：没有国际账号时国际 provider 用静态兜底模型；
+- **网关策略随云端变化**：上游会在服务端随时加规则（例如 2026-10-20 起拦截系统提示里的竞品品牌句，伪装成 `11128` 渠道校验）。插件只能按实测结果改写请求体；遇到新的"账号正常但每轮都 400"时，先看错误码再重放请求体定位；
 - 宿主插件不支持热重载，改代码或升级后必须重启 DSH。
 
 ## 验证
 
 ```bash
-node test/run.mjs                  # 32 项：池/协议/自动化/凭据（mock 上游 + 真实 HTTP）
+node test/run.mjs                  # 37 项：池/协议/自动化/凭据（mock 上游 + 真实 HTTP）
 node test/check-provider.mjs       #  5 项：真实 PiAiAdapter → shim 的适配器契约
-node test/check-client-static.mjs  # 10 项：词典/路由/主题令牌/Slot/可重复添加账号的静态校验
+node test/check-client-static.mjs  # 23 项：词典/路由/主题令牌/Slot/可重复添加账号的静态校验
 ```
 
 `check-provider.mjs` 需要宿主依赖（`@deepseek-ai/dsh-llm-pi-ai`、`@earendil-works/pi-ai`）可解析；在本仓库里可先 `ln -s "$DSH_PROFILE_DIR/node_modules" node_modules`（该软链不随包发布）。

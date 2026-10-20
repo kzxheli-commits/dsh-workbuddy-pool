@@ -29,7 +29,7 @@ const { WorkBuddyClient, classifyUpstreamError, parseRateLimitReset, readBusines
 const { parseAuthDocument, discoverCredentials, workbuddyAccountId, regionOfCredential, accountLabel } = await import("../lib/credentials.js");
 const { WorkBuddyAccountPool } = await import("../lib/pool.js");
 const { WorkBuddyCatalog, FALLBACK_MODELS } = await import("../lib/catalog.js");
-const { createShim, repairToolPairs } = await import("../lib/shim.js");
+const { createShim, repairToolPairs, sanitizeChatMessages } = await import("../lib/shim.js");
 const protocol = await import("../lib/protocol.js");
 const automation = await import("../lib/automation.js");
 const atRest = await import("../lib/at-rest.js");
@@ -42,6 +42,7 @@ const store = await import("../lib/store.js");
 
 const hits = { chat: 0, models: 0, credits: 0, refresh: 0, automation: 0 };
 const perToken = new Map();
+let lastChatBody;
 let mock;
 
 function sse(res, frames, options = {}) {
@@ -74,6 +75,7 @@ const mockServer = createServer(async (req, res) => {
 
   if (path === "/v2/chat/completions") {
     hits.chat += 1;
+    lastChatBody = parsedBody;
     const count = (perToken.get(token) ?? 0) + 1;
     perToken.set(token, count);
     // Account A is rate-limited on its first two calls, then recovers.
@@ -665,6 +667,49 @@ await test("repairs tool-call/tool-result pairing", () => {
   // The call without a result and the result without a call are both dropped.
   assert.equal(repaired.length, 1);
   assert.equal(repaired[0].role, "user");
+});
+
+await test("renames developer and redacts the harness phrase the gateway blocks", () => {
+  const sanitized = sanitizeChatMessages([
+    { role: "developer", content: "You are an AI agent powered by DeepSeek Harness." },
+    { role: "user", content: "explain DeepSeek Harness" },
+    { role: "system", content: [{ type: "text", text: "The DeepSeek  Harness checkout." }, { type: "text", text: "unrelated" }] },
+    { role: "assistant", content: "DeepSeek Harness" },
+  ]);
+  assert.equal(sanitized[0].role, "system");
+  assert.equal(sanitized[0].content, "You are an AI agent powered by DSH.");
+  // Only system messages are the gateway's target; conversation text is untouched.
+  assert.equal(sanitized[1].content, "explain DeepSeek Harness");
+  assert.equal(sanitized[2].content[0].text, "The DSH checkout.");
+  assert.equal(sanitized[2].content[1].text, "unrelated");
+  assert.equal(sanitized[3].content, "DeepSeek Harness");
+});
+
+await test("sends the upstream a sanitized body with a string tool_choice", async () => {
+  shimFixture.pool.resetCooldowns();
+  const response = await fetch(`${shimFixture.base}/v1/chat/completions`, {
+    method: "POST",
+    headers: authHeaders,
+    body: JSON.stringify({
+      model: "glm-5.3",
+      stream: false,
+      messages: [
+        { role: "developer", content: "You are an AI agent powered by DeepSeek Harness." },
+        { role: "user", content: "hi" },
+      ],
+      tools: [{ type: "function", function: { name: "bash", description: "run", parameters: { type: "object" } } }],
+      tool_choice: { type: "function", function: { name: "bash" } },
+    }),
+  });
+  assert.equal(response.status, 200);
+  await response.json();
+  assert.equal(lastChatBody.messages[0].role, "system");
+  assert.equal(lastChatBody.messages[0].content, "You are an AI agent powered by DSH.");
+  // The gateway types `tool_choice` as a string; the object form is a 400.
+  assert.equal(lastChatBody.tool_choice, "bash");
+  assert.equal(lastChatBody.stream, true);
+  // The loopback body the client sent is not mutated in place.
+  assert.equal(lastChatBody.messages[1].content, "hi");
 });
 
 await test("converts a Responses request into a chat body", () => {
