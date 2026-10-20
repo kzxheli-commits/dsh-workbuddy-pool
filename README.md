@@ -53,8 +53,10 @@ DSH 侧注册两个 provider：**WorkBuddy 积分池（国内）** 与 **WorkBud
 
 本插件是 DSH bundle，装进 profile 后出现在插件列表，并在设置卡片提供完整页面。
 
+已发布的安装包在 [Releases](https://github.com/kzxheli-commits/dsh-workbuddy-pool/releases/latest)（每个 tag 附 `dsh-workbuddy-pool-<version>.tgz` 与 sha256）；下载后直接走下面第 2 步，不必自己打包。
+
 ```bash
-# 1. 打包（仓库根目录）
+# 1. 打包（仓库根目录；用发布包可跳过）
 npm pack                      # 生成 dsh-workbuddy-pool-<version>.tgz
 
 # 2. 把 tgz 放进 profile 自己的 vendor/ 目录，用相对路径依赖
