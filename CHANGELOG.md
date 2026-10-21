@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.41
+
+### 修复 0.4.40 的客户端语法错误（它会让本机 DSH 启动失败）
+
+**事故**：0.4.40 给样式加注释时，在 **CSS 模板字符串内部**写了反引号（用来包住令牌名）。反引号把模板字符串提前截断，`lib/client.js` 变成语法错误：
+
+```
+dsh-workbuddy-pool/client.js:708 Uncaught SyntaxError: Unexpected identifier 'color'
+web boot: 1 entry did not activate
+dsh-workbuddy-pool: import failed
+```
+
+后果不是"按钮不显示"，而是**宿主 web boot 失败**：桌面端进入 `DesktopFatalRecovery`（致命错误恢复）对话框，若选择停用插件，`DesktopProjectManager.disableAllPlugins()` 会把 `cordis.patch.yml` 备份为 `.bak-<时间戳>` 并把 profile 的 `dsh.profile.bundles` 重置为基础集合（`dsh-base` + `dsh-web-app`）。表现就是"本机 DSH 直接打开时出问题"：第三方 bundle 全部停用。
+
+**修法**：CSS 注释里不再出现反引号，并在注释中写明"此样式表位于模板字符串内，禁止反引号与 `${}`"。本机 profile 已按事故前的备份恢复（bundle 清单与 patch）。
+
+**门禁**（这次真正的教训）：静态检查用正则提取样式表，非贪婪匹配在误入的反引号处停下，于是"检查通过、构建却是坏的"。新增 `test/check-client-loads.mjs`：
+1. `vm.Script` 真解析 `client.js`——语法错误直接失败；
+2. 断言样式表字面量完整（长度、以 `}` 结尾、内部无反引号、全文反引号成对）；
+3. 用桩 `window.__ModuleLoader__` + 桩 `react` **真正执行模块**，断言注册 id、工厂可被调用、导出对象含 `apply` 与 `inject`。
+
+`test/prove-client-load-gate.mjs` 反向验证该门禁确实会拒掉"注释里带反引号"的写法。`npm run check` 与 `check:client` 均已包含此门禁。
+
 ## 0.4.40
 
 ### 修复第三方主题下按钮文字"消失"（看起来像字体丢了）
