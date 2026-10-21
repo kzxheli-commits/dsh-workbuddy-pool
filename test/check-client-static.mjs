@@ -112,6 +112,34 @@ check("styles use only host theme tokens for colours", () => {
   assert.deepEqual(bareColorWords, []);
 });
 
+/**
+ * A background token is not a foreground colour.
+ *
+ * `color: var(--dsw-alias-bg-base)` only survives the stock theme, where the
+ * brand fill happens to be light and the page base dark. Any theme that lightens
+ * the base (or darkens the fill the other way) collapses text into the fill and
+ * the label vanishes while every other label keeps rendering — reported as
+ * "missing fonts under a third-party theme". The foreground token is
+ * `--dsw-alias-label-primary-foreground`; assert that no rule ever paints text
+ * (or a dot on a fill) with a background token again.
+ */
+check("never paints foregrounds with a background token", () => {
+  const css = /const CSS = `([\s\S]*?)`;/u.exec(source)?.[1] ?? "";
+  // Strip comments first: the stylesheet explains this very rule in prose, and a
+  // naive rule splitter would flag that sentence as a declaration.
+  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//gu, "");
+  const offenders = withoutComments
+    .split("}")
+    .map((rule) => rule.trim())
+    .filter((rule) => /(?:^|[;{])\s*color:\s*var\(--dsw-alias-(?:bg|mask)-/u.test(rule));
+  assert.deepEqual(offenders, [], `foreground painted with a background token:\n${offenders.join("\n")}`);
+
+  // The primary button and an active switch dot both sit ON a brand-coloured
+  // fill, so both must name the foreground token.
+  assert.match(withoutComments, /\.wbp-btn--primary\{[^}]*color:var\(--dsw-alias-label-primary-foreground/u);
+  assert.match(withoutComments, /\.wbp-switch\[aria-checked="true"\] \.wbp-switch-dot\{[^}]*background:var\(--dsw-alias-label-primary-foreground/u);
+});
+
 check("slot registrations keep their addressing", () => {
   assert.match(source, /name: "main", key: PANEL_ID/u);
   assert.match(source, /name: "sidebar\.panellist", id: PANEL_ID/u);

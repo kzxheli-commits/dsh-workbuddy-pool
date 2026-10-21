@@ -148,7 +148,7 @@ dsh plugin --profile <profile> install
 ```bash
 node test/run.mjs                  # 44 项：池/协议/自动化/凭据（mock 上游 + 真实 HTTP）
 node test/check-provider.mjs       #  5 项：真实 PiAiAdapter → shim 的适配器契约
-node test/check-client-static.mjs  # 23 项：词典/路由/主题令牌/Slot/可重复添加账号的静态校验
+node test/check-client-static.mjs  # 24 项：词典/路由/主题令牌/Slot/可重复添加账号的静态校验
 ```
 
 `check-provider.mjs` 需要宿主依赖（`@deepseek-ai/dsh-llm-pi-ai`、`@earendil-works/pi-ai`）可解析；在本仓库里可先 `ln -s "$DSH_PROFILE_DIR/node_modules" node_modules`（该软链不随包发布）。
