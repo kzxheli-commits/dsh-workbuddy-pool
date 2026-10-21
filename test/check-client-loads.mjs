@@ -9,18 +9,21 @@
  * notice because it extracted the stylesheet with a regex that happily stopped
  * at the stray backtick. This check parses and executes the real file instead.
  *
+ * The path is resolved RELATIVE TO THIS SCRIPT, so the same gate works from the
+ * source tree, from an installed package copy, and as the npm `prepack` step —
+ * where the working directory is whatever package is being packed, not this
+ * repository. (An absolute path here made `prepack` validate the repo copy while
+ * a different file was being packaged.)
+ *
  * Usage: node test/check-client-loads.mjs [path-to-client.js]
  */
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
-const ROOT = "C:/Users/lenovo/Documents/deepseek-harness/default-workspace/workbuddy-pool";
-// Default to the source tree; the installer can point this at the installed copy
-// to prove the packaged bundle loads before the Host is restarted.
-const clientPath = process.argv[2] ?? join(ROOT, "lib", "client.js");
+const clientPath = process.argv[2] ?? fileURLToPath(new URL("../lib/client.js", import.meta.url));
 const source = readFileSync(clientPath, "utf8");
 console.log(`checking ${clientPath}`);
 

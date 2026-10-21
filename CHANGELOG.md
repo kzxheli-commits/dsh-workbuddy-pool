@@ -23,7 +23,13 @@ dsh-workbuddy-pool: import failed
 
 `test/prove-client-load-gate.mjs` 反向验证该门禁确实会拒掉"注释里带反引号"的写法。`npm run check` 与 `check:client` 均已包含此门禁。
 
+**发布侧防护**：`package.json` 增加 `prepack` 钩子，打包前自动跑同一个门禁——坏包打不出来。为此门禁改为**按脚本相对路径**定位 `../lib/client.js`（原先写死仓库绝对路径，会让 `prepack` 去检查仓库那份、而实际打包的是另一份，等于没检查）；`test/prove-prepack-gate.mjs` 用临时副本反向验证"损坏的 client 会让 `npm pack` 失败"。
+
+**已发布的 0.4.40 已隔离**：删除其 tgz 资产、标记为 pre-release（不会出现在 latest）、说明页置顶警告与恢复指引。`tools/audit-tarballs.mjs` 用同一门禁审计了本地全部 7 个构建——仅 0.4.40 为 BROKEN，0.4.35–0.4.39 与 0.4.41 均可正常加载；0.4.40 的下载计数为 1（本次事故机器的验证下载），没有扩散到其他用户。
+
 ## 0.4.40
+
+> **⚠️ 这个版本已下架**：客户端 bundle 里误入反引号导致 `client.js` 语法错误，装它会让桌面端 web boot 失败并可能触发"停用所有插件"的恢复动作。发布页资产已删除并标记为 pre-release，请使用 0.4.41。详见 0.4.41 条目。
 
 ### 修复第三方主题下按钮文字"消失"（看起来像字体丢了）
 

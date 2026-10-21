@@ -82,7 +82,8 @@
     "test": "node test/run.mjs",
     "check:provider": "node test/check-provider.mjs",
     "check:client": "node test/check-client-static.mjs && node test/check-client-loads.mjs",
-    "check": "node test/run.mjs && node test/check-client-static.mjs && node test/check-client-loads.mjs"
+    "check": "node test/run.mjs && node test/check-client-static.mjs && node test/check-client-loads.mjs",
+    "prepack": "node test/check-client-loads.mjs"
   },
   "icon": "./icon.png"
 }
