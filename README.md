@@ -109,6 +109,9 @@ dsh plugin --profile <profile> install
 | 任务奖励 | 11:00 | 报名开放任务 → 领取可领奖励 |
 | 连登奖励 | 12:00 | 兑换已解锁档位 + 有次数就抽奖 |
 | 猫猫旅行 | 09:00 / 21:00 | 同意条款 → 领养 → 出发 / 领取 |
+| 服务异常补偿 | 10:00 | 领取「DeepSeek 模型服务异常额外补偿」（500 积分，每人限一次） |
+
+**服务异常补偿是一次性活动，不是每日任务**：活动窗口在**北京时间 2026-10-22 00:00 结束**，之后卡片上不再显示这一行，调度器也不再排它。判定以服务端 `compensation-status` 的 `claimed` 为准——实测「领取」接口对已到账的领取会返回 `claimed: false`、重复领取返回 `code 10001 每人限领一次`，所以任务在领取后**回读状态**确认，而不是相信领取响应。
 
 每次运行结果（每账号、状态、收益）都落盘并在卡片「自动化」页展示；收益账本按天累计。
 
@@ -143,7 +146,7 @@ dsh plugin --profile <profile> install
 ## 验证
 
 ```bash
-node test/run.mjs                  # 40 项：池/协议/自动化/凭据（mock 上游 + 真实 HTTP）
+node test/run.mjs                  # 44 项：池/协议/自动化/凭据（mock 上游 + 真实 HTTP）
 node test/check-provider.mjs       #  5 项：真实 PiAiAdapter → shim 的适配器契约
 node test/check-client-static.mjs  # 23 项：词典/路由/主题令牌/Slot/可重复添加账号的静态校验
 ```

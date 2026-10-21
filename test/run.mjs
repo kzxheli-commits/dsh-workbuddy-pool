@@ -889,6 +889,153 @@ await test("treats an already-checked-in answer as success", async () => {
   assert.equal(result.already, true);
 });
 
+/** A client that answers the compensation routes and records what was called. */
+function compensationClient(data, calls = []) {
+  let claimed = data.status.claimed;
+  return new WorkBuddyClient({
+    fetchImpl: async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      calls.push({ path, method: init?.method });
+      if (path === "/billing/meter/compensation-status") {
+        return new Response(JSON.stringify({ code: 0, data: { ...data.status, claimed } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (path === "/billing/meter/claim-compensation") {
+        // Mirrors the live gateway: the claim body does NOT report the grant.
+        if (claimed) {
+          return new Response(JSON.stringify({ code: 10001, msg: "每人限领一次，您已领取过无法重复领取" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        claimed = true;
+        return new Response(JSON.stringify({ code: 0, data: { claimed: false, credit_num: 0 } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ code: 404, msg: "Route Not Found" }), { status: 404, headers: { "content-type": "application/json" } });
+    },
+  });
+}
+
+await test("reads and claims the one-off compensation offer on the right routes", async () => {
+  const calls = [];
+  const client = compensationClient(
+    { status: { active: true, claimed: false, credit_num: 500, end_time: "2026-10-22 23:59:59" } },
+    calls,
+  );
+  const credential = { accessToken: "t", domain: "www.codebuddy.cn" };
+  const status = await automation.compensationStatus(client, credential);
+  assert.equal(status.active, true);
+  assert.equal(status.claimed, false);
+  assert.equal(status.credit, 500);
+  assert.equal(status.endTime, "2026-10-22 23:59:59");
+  // The campaign family lives at /billing/meter/*, NOT /v2/billing/meter/*.
+  assert.deepEqual(calls.map((call) => call.path), ["/billing/meter/compensation-status"]);
+  assert.ok(calls.every((call) => call.method === "POST"));
+});
+
+await test("the compensation job claims once per account, then reports already-claimed", async () => {
+  const pool = buildPool();
+  // Per-account state: two workers run at once, and a shared "claimed" flag
+  // would make the second account look already-served.
+  const claimedByAccount = new Map();
+  const client = new WorkBuddyClient({
+    fetchImpl: async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const account = String(init?.headers?.authorization ?? "");
+      const claimed = claimedByAccount.get(account) === true;
+      if (path === "/billing/meter/compensation-status") {
+        return new Response(JSON.stringify({ code: 0, data: { active: true, claimed, credit_num: 500 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (path === "/billing/meter/claim-compensation") {
+        if (claimed) {
+          return new Response(JSON.stringify({ code: 10001, msg: "每人限领一次，您已领取过无法重复领取" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        claimedByAccount.set(account, true);
+        // The live gateway does not report the grant in the claim body.
+        return new Response(JSON.stringify({ code: 0, data: { claimed: false, credit_num: 0 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ code: 404, msg: "Route Not Found" }), { status: 404, headers: { "content-type": "application/json" } });
+    },
+  });
+  const scheduler = new automation.WorkBuddyScheduler({ pool, client, logger: { info() {}, warn() {}, error() {} } });
+  const run = await scheduler.runJob("compensation");
+  // One 500-credit claim per account the gateway serves, confirmed by the
+  // re-read status even though the claim response reports no grant. The fixture
+  // pool also holds the token-dead account an earlier test registered, so the
+  // claimable count is not the run size.
+  const claimed = run.results.filter((entry) => entry.status === "ok");
+  assert.equal(claimed.length, 2, "the two live fixture accounts are the ones the gateway serves");
+  assert.equal(run.credit, 500 * claimed.length);
+  assert.ok(claimed.every((entry) => entry.credit === 500));
+  // The token-dead account cannot reach the campaign and must not be counted.
+  const dead = run.results.find((entry) => entry.label?.includes("dead"));
+  assert.equal(dead.credit, 0);
+  scheduler.dispose();
+
+  const second = compensationClient({ status: { active: true, claimed: true, credit_num: 500 } });
+  const again = new automation.WorkBuddyScheduler({ pool, client: second, logger: { info() {}, warn() {}, error() {} } });
+  const rerun = await again.runJob("compensation");
+  assert.equal(rerun.credit, 0);
+  assert.ok(rerun.results.every((entry) => entry.status === "already"));
+  again.dispose();
+  pool.dispose();
+});
+
+await test("the compensation campaign closes at Beijing midnight on 2026-10-22", async () => {
+  const campaign = await import("../lib/campaign.js");
+  const beforeDeadline = Date.UTC(2026, 9, 21, 15, 59, 59);
+  const afterDeadline = Date.UTC(2026, 9, 21, 16, 0, 0);
+  assert.equal(campaign.campaignOpen(beforeDeadline), true);
+  assert.equal(campaign.campaignOpen(afterDeadline), false);
+  assert.equal(campaign.CAMPAIGN_DEADLINE_MS, afterDeadline);
+  assert.equal(new Date(campaign.CAMPAIGN_DEADLINE_MS).toISOString(), "2026-10-21T16:00:00.000Z");
+  assert.equal(campaign.campaignDeadlineIso(), "2026-10-21T16:00:00.000Z");
+
+  // After the deadline the job answers "skipped" and never touches the network.
+  const pool = buildPool();
+  const offline = new WorkBuddyClient({
+    fetchImpl: async () => {
+      throw new Error("the gateway must not be called after the campaign closed");
+    },
+  });
+  const scheduler = new automation.WorkBuddyScheduler({ pool, client: offline, logger: { info() {}, warn() {}, error() {} } });
+  scheduler.now = () => new Date(afterDeadline);
+  const closed = await scheduler.runJob("compensation");
+  assert.equal(closed.credit, 0);
+  assert.ok(closed.results.every((entry) => entry.status === "skipped"));
+  scheduler.dispose();
+  pool.dispose();
+});
+
+await test("the card is told when the campaign is closed, and the job is not re-armed", async () => {
+  const pool = buildPool();
+  const scheduler = new automation.WorkBuddyScheduler({ pool, client, logger: { info() {}, warn() {}, error() {} } });
+  const status = scheduler.status();
+  assert.equal(typeof status.campaign.open, "boolean");
+  assert.equal(status.campaign.deadline, "2026-10-21T16:00:00.000Z");
+  assert.ok(status.labels.compensation !== undefined);
+
+  // A fresh day after the deadline: the tick loop must not arm a closed
+  // campaign even though its hour matches and no run is recorded yet.
+  scheduler.now = () => new Date(Date.UTC(2026, 9, 22, 3, 0, 0));
+  scheduler.state = scheduler.load();
+  scheduler.options.enabled = true;
+  scheduler.options.hours.compensation = [0];
+  scheduler.tick();
+  assert.equal(scheduler.state.runs.compensation, undefined);
+
+  scheduler.dispose();
+  pool.dispose();
+});
+
 section("status payload");
 
 await test("region summaries are computed per request, not frozen at boot", async () => {
