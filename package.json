@@ -2,7 +2,7 @@
   "name": "dsh-workbuddy-pool",
   "displayName": "WorkBuddy Pool",
   "description": "把本机/导入的 WorkBuddy 账号合并成一个自动故障转移的模型池，以回环 OpenAI/Anthropic 兼容端点接入 DeepSeek Harness（多账号轮换、积分、签到、扫码登录）。",
-  "version": "0.4.41",
+  "version": "0.4.45",
   "license": "MIT",
   "private": false,
   "author": "dsh-workbuddy-pool contributors",

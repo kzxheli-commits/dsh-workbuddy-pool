@@ -27,11 +27,15 @@ process.env["DSH_HOME"] = join(sandbox, "dsh");
 mkdirSync(process.env["DSH_HOME"], { recursive: true });
 
 const { WorkBuddyClient, classifyUpstreamError, parseRateLimitReset, readBusinessCode, parseUpstreamModel, supportsImagesOf } = await import("../lib/upstream.js");
-const { parseAuthDocument, discoverCredentials, workbuddyAccountId, regionOfCredential, accountLabel } = await import("../lib/credentials.js");
+const credentials = await import("../lib/credentials.js");
+const { parseAuthDocument, discoverCredentials, workbuddyAccountId, regionOfCredential, accountLabel } = credentials;
 const { WorkBuddyAccountPool } = await import("../lib/pool.js");
 const { WorkBuddyCatalog, FALLBACK_MODELS } = await import("../lib/catalog.js");
 const { createShim, repairToolPairs, sanitizeChatMessages, desensitizeSystemText } = await import("../lib/shim.js");
-const { conversationIdOf, fingerprintHeaders, resetFingerprintState } = await import("../lib/fingerprint.js");
+const { conversationIdOf, fingerprintHeaders, getFingerprintProfile, resetFingerprintState, setFingerprintProfile } = await import("../lib/fingerprint.js");
+const { MIN_ROTATE_HOURS, PROFILE_SCHEMA, clampRotateHours, defaultProfile, normalizeProfile, profileHeaders, randomProfile, resetProfileValue, rotationDue, setProfileValue } = await import(
+  "../lib/fingerprint-profile.js"
+);
 const protocol = await import("../lib/protocol.js");
 const automation = await import("../lib/automation.js");
 const atRest = await import("../lib/at-rest.js");
@@ -685,17 +689,55 @@ await test("renames developer and desensitises the harness phrase the gateway bl
     { role: "assistant", content: "DeepSeek Harness" },
   ]);
   assert.equal(sanitized[0].role, "system");
-  // The keyword match is broken by a zero-width space; the visible text is intact.
-  assert.equal(sanitized[0].content, "You are an AI agent powered by D\u200beepSeek Harness.");
-  assert.equal(sanitized[0].content.replace(/\u200b/gu, ""), "You are an AI agent powered by DeepSeek Harness.");
-  // Only system messages are the gateway's target; conversation text is untouched.
-  assert.equal(sanitized[1].content, "explain DeepSeek Harness");
-  assert.equal(sanitized[2].content[0].text.replace(/\u200b/gu, ""), "The DeepSeek  Harness checkout.");
-  assert.ok(sanitized[2].content[0].text.includes("\u200b"));
+  // The brand is renamed in prose, so the prompt the model reads names WorkBuddy.
+  assert.equal(sanitized[0].content, "You are an AI agent running inside WorkBuddy.");
+  // Every role is covered now, not just `system`: the filter reads the whole prompt.
+  assert.equal(sanitized[1].content, "explain WorkBuddy Harness");
+  // A doubled space in the source collapses as part of the phrase rewrite.
+  assert.equal(sanitized[2].content[0].text, "The WorkBuddy Harness checkout.");
   assert.equal(sanitized[2].content[1].text, "unrelated");
-  assert.equal(sanitized[3].content, "DeepSeek Harness");
-  // Idempotent: an already-desensitised text is left alone.
+  assert.equal(sanitized[3].content, "WorkBuddy Harness");
+  // Idempotent: an already-sanitised text is left alone.
   assert.equal(desensitizeSystemText(sanitized[0].content), sanitized[0].content);
+});
+
+await test("desensitisation never touches paths, file names, URLs or model ids", () => {
+  const text = [
+    "Read C:\\Users\\lenovo\\Documents\\deepseek-harness\\README.md before editing.",
+    "The repo is deepseek-harness and the file is lib/shim.js.",
+    "Fetch https://example.com/deepseek/harness.json for details.",
+    "Install @deepseek-ai/schemastery and run deepseek-v4.1-flash.",
+    "Then check $env:DSH_HOME and ./scripts/build.ps1.",
+    "DeepSeek Harness is the product name here.",
+  ].join(" ");
+  const out = desensitizeSystemText(text);
+  // Every protected span survives byte for byte.
+  for (const span of [
+    "C:\\Users\\lenovo\\Documents\\deepseek-harness\\README.md",
+    "deepseek-harness",
+    "lib/shim.js",
+    "https://example.com/deepseek/harness.json",
+    "@deepseek-ai/schemastery",
+    "deepseek-v4.1-flash",
+    "$env:DSH_HOME",
+    "./scripts/build.ps1",
+  ]) {
+    assert.ok(out.includes(span), `expected ${span} to survive unchanged`);
+  }
+  // ...while the prose brand mention is renamed.
+  assert.ok(out.includes("WorkBuddy Harness"), "the prose brand mention is renamed");
+  assert.ok(!/\bDeepSeek Harness\b/u.test(out), "no prose DeepSeek mention is left behind");
+});
+
+await test("the measured filter trigger sentence is rewritten", () => {
+  const trigger = "Tokens prefixed with @ are paths the user explicitly referenced.";
+  const out = desensitizeSystemText(trigger);
+  assert.notEqual(out, trigger, "the triggering sentence must be rewritten");
+  assert.ok(out.includes("@"), "the instruction still mentions @-prefixed tokens");
+  // The rewrite is stable: running it twice changes nothing further.
+  assert.equal(desensitizeSystemText(out), out);
+  // With the trigger rule off the sentence is left alone.
+  assert.equal(desensitizeSystemText(trigger, { triggers: false, brand: false }), trigger);
 });
 
 await test("sends the upstream a sanitized body with a string tool_choice", async () => {
@@ -717,8 +759,9 @@ await test("sends the upstream a sanitized body with a string tool_choice", asyn
   assert.equal(response.status, 200);
   await response.json();
   assert.equal(lastChatBody.messages[0].role, "system");
-  assert.equal(lastChatBody.messages[0].content.replace(/\u200b/gu, ""), "You are an AI agent powered by DeepSeek Harness.");
-  assert.ok(lastChatBody.messages[0].content.includes("\u200b"));
+  // The brand is renamed for the outbound request, so the prompt no longer carries
+  // the phrase the gateway's channel check refuses.
+  assert.equal(lastChatBody.messages[0].content, "You are an AI agent running inside WorkBuddy.");
   // The gateway types `tool_choice` as a string; the object form is a 400.
   assert.equal(lastChatBody.tool_choice, "bash");
   assert.equal(lastChatBody.stream, true);
@@ -726,9 +769,9 @@ await test("sends the upstream a sanitized body with a string tool_choice", asyn
   assert.equal(lastChatBody.messages[1].content, "hi");
   // Official-client fingerprint headers travel with every chat call.
   assert.equal(lastChatBody.model, "glm-5.3");
-  assert.match(String(lastChatHeaders["user-agent"]), /^CodeBuddyIDE\/4\.12\.0 CodeBuddy\/4\.12\.0$/u);
-  assert.equal(lastChatHeaders["x-ide-name"], "CodeBuddyIDE");
-  assert.equal(lastChatHeaders["x-ide-version"], "4.12.0");
+  assert.match(String(lastChatHeaders["user-agent"]), /^WorkBuddy\/5\.9\.2 WorkBuddy\/5\.9\.2 CLI\/2\.165\.0$/u);
+  assert.equal(lastChatHeaders["x-ide-name"], "WorkBuddy");
+  assert.equal(lastChatHeaders["x-ide-version"], "5.9.2");
   assert.equal(lastChatHeaders["x-product-code"], "codebuddy");
   assert.equal(lastChatHeaders["x-model-id"], "glm-5.3");
   assert.match(String(lastChatHeaders["x-request-trace-id"]), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
@@ -757,23 +800,39 @@ await test("keeps one trace chain per conversation and a fresh one for a new pro
   assert.equal(second["x-b3-parentspanid"], first["x-b3-spanid"]);
   // Per-request ids are fresh; the conversation id and trace id are not.
   assert.notEqual(first["x-conversation-request-id"], second["x-conversation-request-id"]);
-  assert.equal(first["x-request-id"], first["x-conversation-request-id"]);
+  assert.notEqual(first["x-request-id"], second["x-request-id"]);
+  // The ids are uuid-shaped, exactly as the official client writes them.
+  assert.match(String(first["x-request-id"]), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  assert.match(String(first["x-conversation-request-id"]), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  // The official client sends an ACP connection id per request.
+  assert.match(String(first["acp-connection-id"]), /^[0-9a-f]{8}-/u);
+  // b3 carries four fields, as the official client writes it.
+  assert.match(String(first["b3"]), /^[0-9a-f]{32}-[0-9a-f]{16}-1-[0-9a-f]{16}$/u);
 });
 
-await test("intl and CN fingerprints are disjoint", () => {
+await test("both regions send the same official identity", () => {
   const cn = fingerprintHeaders({ region: "cn", model: "glm-5.3", conversationId: "0".repeat(32) });
   const global = fingerprintHeaders({ region: "global", model: "glm-5.3", conversationId: "0".repeat(32) });
-  assert.match(String(global["user-agent"]), /^workbuddy-ai\/5\.7\.6 workbuddy-ai\/5\.7\.6 CLI\/2\.156\.0$/u);
+  // One official binary serves both gateways, so the identity is identical.
+  assert.match(String(cn["user-agent"]), /^WorkBuddy\/5\.9\.2 WorkBuddy\/5\.9\.2 CLI\/2\.165\.0$/u);
+  assert.equal(global["user-agent"], cn["user-agent"]);
+  assert.equal(global["x-ide-version"], cn["x-ide-version"]);
   assert.equal(global["x-ide-name"], "WorkBuddy");
-  assert.equal(global["x-stainless-runtime"], "node");
-  // CN-only headers must not leak into the intl fingerprint.
-  for (const header of ["x-product-code", "x-product-version", "x-env-id", "x-model-id", "x-request-trace-id", "monitor_httpsendtime", "accept-language", "sec-fetch-mode"]) {
+  assert.equal(global["x-ide-type"], "WorkBuddy");
+  assert.equal(global["x-private-data"], "true");
+  assert.equal(global["x-product"], "SaaS");
+  assert.equal(global["x-agent-purpose"], "conversation");
+  // The invented stainless block the old profile sent is gone.
+  for (const header of ["x-stainless-runtime", "x-stainless-os", "x-stainless-arch", "x-stainless-lang"]) {
+    assert.equal(global[header], undefined, `the official client sends no ${header}`);
+  }
+  // CN-only extras stay off the intl request.
+  for (const header of ["x-product-code", "x-env-id", "x-model-id", "x-request-trace-id", "monitor_httpsendtime", "accept-language", "sec-fetch-mode"]) {
     assert.equal(global[header], undefined, `intl fingerprint must not send ${header}`);
   }
-  // Official intl ties x-request-id to the message id; CN ties it to the request id.
-  assert.equal(global["x-request-id"], global["x-conversation-message-id"]);
-  assert.equal(cn["x-request-id"], cn["x-conversation-request-id"]);
-  assert.match(String(cn["user-agent"]), /^CodeBuddyIDE\/4\.12\.0 CodeBuddy\/4\.12\.0$/u);
+  // ...and stay on the CN request.
+  assert.equal(cn["x-product-code"], "codebuddy");
+  assert.equal(cn["x-env-id"], "production");
 });
 
 await test("gzips a large chat body and the upstream still reads it", async () => {
@@ -889,6 +948,92 @@ await test("treats an already-checked-in answer as success", async () => {
   assert.equal(result.already, true);
 });
 
+await test("recognises a rejected sign-in in both shapes the gateway uses", () => {
+  const make = (message, status) => {
+    const error = new Error(message);
+    if (status !== undefined) error.status = status;
+    return error;
+  };
+  // Shape 1: a bare 401 HTML page from the billing/growth hosts.
+  const html401 = "<html><head><title>401 Authorization Required</title></head><body><hr><center>openresty</center></body></html>";
+  assert.equal(automation.isSessionRejected(make(html401)), true);
+  // Shape 2: the parameterised envelope when the refresh token is also tried.
+  assert.equal(automation.isSessionRejected(make("12153:refresh token failed:400 Bad Request: invalid_grant: Session not active")), true);
+  assert.equal(automation.isSessionRejected(make("x", 401)), true);
+  // Ordinary job failures must NOT be mistaken for a dead sign-in.
+  assert.equal(automation.isSessionRejected(make("每人限领一次，您已领取过无法重复领取")), false);
+  assert.equal(automation.isSessionRejected(make("404 page not found")), false);
+  assert.equal(automation.isSessionRejected(undefined), false);
+});
+
+await test("tells an offline grant from a session-bound one", () => {
+  // A JWT payload is base64url; build both kinds with real claims.
+  const jwt = (payload) => `h.${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}.s`;
+  const offline = { refreshToken: jwt({ typ: "Offline", scope: "openid acr profile basic email offline_access" }) };
+  const session = { refreshToken: jwt({ typ: "Refresh", scope: "openid acr profile basic web-origins roles email" }) };
+  const opaque = { refreshToken: "not-a-jwt" };
+
+  assert.deepEqual(credentials.refreshGrantOf(offline), { kind: "offline", type: "Offline", offline: true });
+  assert.deepEqual(credentials.refreshGrantOf(session), { kind: "session", type: "Refresh", offline: false });
+  assert.deepEqual(credentials.refreshGrantOf(opaque), { kind: "unknown" });
+  assert.equal(credentials.refreshIsSessionBound(session), true);
+  assert.equal(credentials.refreshIsSessionBound(offline), false);
+});
+
+await test("a rejected session leaves rotation and the card says why", async () => {
+  const pool = buildPool();
+  const account = pool.accountsOf("cn")[0];
+  assert.equal(pool.usable(account), true);
+  pool.markSignedOut(account, "登录会话已失效");
+  assert.equal(pool.usable(account), false);
+  const row = pool.status("cn").accounts.find((entry) => entry.id === account.id);
+  assert.equal(row.state, "blocked");
+  assert.equal(row.reason, "needs-sign-in");
+  // A balance from the dead session is not shown as spendable credit.
+  assert.equal(row.credits, null);
+  assert.equal(row.signedOut.reason, "登录会话已失效");
+  pool.markSignedIn(account);
+  assert.equal(pool.usable(account), true);
+  pool.dispose();
+});
+
+await test("renews an offline grant before it expires, never a session grant", () => {
+  const sameDay = Date.UTC(2026, 9, 25, 8, 0, 0);
+  const jwt = (payload) => `h.${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}.s`;
+
+  const pool = new WorkBuddyAccountPool({
+    client,
+    scanner: () => discoverCredentials(testEnv, "linux", testHome),
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  pool.applyConfig({ distribution: "priority", minUsableCredits: 0 });
+  pool.scan();
+  const account = pool.accountsOf("cn")[0];
+
+  // An offline grant whose access token expires inside the window is due.
+  account.credential = {
+    ...account.credential,
+    accessToken: jwt({ exp: Math.floor((sameDay + 45 * 60_000) / 1000) }),
+    refreshToken: jwt({ typ: "Offline", scope: "openid offline_access" }),
+    expiresAtMs: 0,
+  };
+  assert.equal(pool.needsRefresh(account, sameDay), true);
+  assert.deepEqual(pool.refreshDue(sameDay).map((state) => state.id), [account.id]);
+
+  // Plenty of time left -> not due.
+  assert.equal(pool.needsRefresh(account, sameDay - 3 * 3_600_000), false);
+
+  // A session-bound grant is never proactively renewed: it cannot be.
+  account.credential = {
+    ...account.credential,
+    refreshToken: jwt({ typ: "Refresh", scope: "openid email" }),
+  };
+  assert.equal(pool.needsRefresh(account, sameDay), false);
+  assert.deepEqual(pool.refreshDue(sameDay), []);
+
+  pool.dispose();
+});
+
 /** A client that answers the compensation routes and records what was called. */
 function compensationClient(data, calls = []) {
   let claimed = data.status.claimed;
@@ -966,6 +1111,11 @@ await test("the compensation job claims once per account, then reports already-c
     },
   });
   const scheduler = new automation.WorkBuddyScheduler({ pool, client, logger: { info() {}, warn() {}, error() {} } });
+  // Pin the clock INSIDE the campaign window: the real deadline (Beijing
+  // midnight 2026-10-22) has passed, and this test is about the claim flow, not
+  // about the closure. A wall-clock-dependent test turned red the day the offer
+  // ended even though the code was correct.
+  scheduler.now = () => new Date(Date.UTC(2026, 9, 21, 4, 0, 0));
   const run = await scheduler.runJob("compensation");
   // One 500-credit claim per account the gateway serves, confirmed by the
   // re-read status even though the claim response reports no grant. The fixture
@@ -982,6 +1132,7 @@ await test("the compensation job claims once per account, then reports already-c
 
   const second = compensationClient({ status: { active: true, claimed: true, credit_num: 500 } });
   const again = new automation.WorkBuddyScheduler({ pool, client: second, logger: { info() {}, warn() {}, error() {} } });
+  again.now = () => new Date(Date.UTC(2026, 9, 21, 4, 0, 0));
   const rerun = await again.runJob("compensation");
   assert.equal(rerun.credit, 0);
   assert.ok(rerun.results.every((entry) => entry.status === "already"));
@@ -1036,6 +1187,122 @@ await test("the card is told when the campaign is closed, and the job is not re-
   pool.dispose();
 });
 
+section("rotating fingerprint");
+
+await test("the shipped profile is the measured-working header set", () => {
+  const profile = defaultProfile();
+  assert.equal(profile.cn["x-ide-version"], "5.9.2");
+  assert.equal(profile.cn["user-agent"], "WorkBuddy/5.9.2 WorkBuddy/5.9.2 CLI/2.165.0");
+  assert.equal(profile.global["user-agent"], "WorkBuddy/5.9.2 WorkBuddy/5.9.2 CLI/2.165.0");
+  assert.equal(profile.enabled, true);
+  assert.equal(profile.rotateHours, 3);
+});
+
+await test("rotation cannot be configured below three hours", () => {
+  assert.equal(MIN_ROTATE_HOURS, 3);
+  assert.equal(clampRotateHours(1), 3);
+  assert.equal(clampRotateHours(0), 3);
+  assert.equal(clampRotateHours(-5), 3);
+  assert.equal(clampRotateHours(6), 6);
+  // A saved profile that somehow carries a lower value is clamped on read.
+  assert.equal(normalizeProfile({ rotateHours: 1 }).rotateHours, 3);
+});
+
+await test("a rotation changes the identity but keeps the header set valid", () => {
+  const before = defaultProfile();
+  let rotated;
+  // Rotation picks a different value per randomised field, so one rotation is
+  // always observable.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    rotated = randomProfile(before);
+    if (rotated.cn["x-ide-version"] !== before.cn["x-ide-version"]) break;
+  }
+  assert.notEqual(rotated.cn["x-ide-version"], before.cn["x-ide-version"]);
+  assert.equal(rotated.revision, before.revision + 1);
+  assert.ok(rotated.rotatedAt > 0);
+  // The UA is rebuilt from the version, so the two can never disagree.
+  assert.ok(rotated.cn["user-agent"].includes(rotated.cn["x-ide-version"]));
+  // Both regions rotate together: one official binary serves both gateways.
+  assert.equal(rotated.global["x-ide-version"], rotated.cn["x-ide-version"]);
+  assert.equal(rotated.global["user-agent"], rotated.cn["user-agent"]);
+  // The UA still carries a CLI half, so the gateway can parse the copilot version.
+  assert.match(rotated.cn["user-agent"], /CLI\/[\d.]+$/u);
+  // No required header is dropped by a rotation.
+  const headers = profileHeaders("cn", rotated);
+  for (const key of ["user-agent", "x-ide-version", "x-product-code", "x-env-id", "x-agent-intent", "accept-language"]) {
+    assert.equal(typeof headers[key], "string", `rotation dropped ${key}`);
+  }
+});
+
+await test("a rotation is only due once its interval has elapsed", () => {
+  const now = Date.UTC(2026, 9, 27, 0, 0, 0);
+  const fresh = randomProfile(defaultProfile(), now);
+  assert.equal(rotationDue(fresh, now + 60_000), false);
+  assert.equal(rotationDue(fresh, now + 3 * 3_600_000 - 1), false);
+  assert.equal(rotationDue(fresh, now + 3 * 3_600_000), true);
+  // A profile that was never rotated is due immediately, and a disabled profile
+  // never rotates.
+  assert.equal(rotationDue(defaultProfile(), now), true);
+  assert.equal(rotationDue({ ...fresh, enabled: false }, now + 10 * 3_600_000), false);
+});
+
+await test("one parameter can be edited alone, and reset back", () => {
+  const base = defaultProfile();
+  const edited = setProfileValue(base, "cn", "accept-language", "zh-CN");
+  assert.equal(edited.profile.cn["accept-language"], "zh-CN");
+  // Everything else is untouched.
+  assert.equal(edited.profile.cn["x-ide-version"], base.cn["x-ide-version"]);
+  assert.equal(edited.profile.global["user-agent"], base.global["user-agent"]);
+  // A UA that disagrees with the version header is reported, not silently accepted.
+  const broken = setProfileValue(base, "cn", "user-agent", "CodeBuddyIDE/9.9.9 CodeBuddy/9.9.9");
+  assert.ok(typeof broken.warning === "string" && broken.warning.includes(base.cn["x-ide-version"]));
+  // Reset restores the shipped value.
+  assert.equal(resetProfileValue(edited.profile, "cn", "accept-language").cn["accept-language"], base.cn["accept-language"]);
+  // Control characters are refused: they would make the header unparseable.
+  assert.throws(() => setProfileValue(base, "cn", "x-ide-version", "4.12.0\r\nX-Evil: 1"), /control characters/u);
+});
+
+await test("the active profile is what the request headers carry", () => {
+  const original = getFingerprintProfile();
+  try {
+    const rotated = randomProfile(original);
+    setFingerprintProfile(rotated);
+    const headers = fingerprintHeaders({ region: "cn", model: "glm-5.3", conversationId: "0".repeat(32) });
+    assert.equal(headers["user-agent"], rotated.cn["user-agent"]);
+    assert.equal(headers["x-ide-version"], rotated.cn["x-ide-version"]);
+    assert.equal(headers["accept-language"], rotated.cn["accept-language"]);
+    // Per-request ids stay per-request: they are not part of the profile.
+    assert.match(String(headers["x-b3-spanid"]), /^[0-9a-f]{16}$/u);
+  } finally {
+    setFingerprintProfile(original);
+  }
+});
+
+await test("a profile saved by an older schema cannot pin a stale identity", () => {
+  // This is the exact shape the previous build persisted: a CN UA that mixes the
+  // CodeBuddyIDE prefix with a WorkBuddy version, plus the invented stainless block.
+  const stale = {
+    version: 1,
+    revision: 3,
+    rotatedAt: 1793115730659,
+    enabled: true,
+    rotateHours: 5,
+    cn: { "user-agent": "CodeBuddyIDE/5.9.2 CodeBuddy/5.9.2", "x-ide-version": "4.12.1", "x-product-version": "4.12.1" },
+    global: { "user-agent": "workbuddy-ai/5.8.0 workbuddy-ai/5.8.0 CLI/2.155.3", "x-ide-version": "5.8.0", "x-stainless-os": "MacOS" },
+  };
+  const clean = normalizeProfile(stale);
+  assert.equal(clean.schema, PROFILE_SCHEMA);
+  assert.equal(clean.cn["user-agent"], "WorkBuddy/5.9.2 WorkBuddy/5.9.2 CLI/2.165.0");
+  assert.equal(clean.global["user-agent"], "WorkBuddy/5.9.2 WorkBuddy/5.9.2 CLI/2.165.0");
+  assert.equal(clean.cn["x-product-version"], undefined, "a dropped header must not survive the migration");
+  assert.equal(clean.global["x-stainless-os"], undefined);
+  // The operator's own interval survives, because it is a setting, not an identity.
+  assert.equal(clean.rotateHours, 5);
+  // A profile at the current schema round-trips unchanged.
+  const fresh = randomProfile(defaultProfile(), 1_800_000_000_000);
+  assert.equal(normalizeProfile(fresh).cn["user-agent"], fresh.cn["user-agent"]);
+});
+
 section("status payload");
 
 await test("region summaries are computed per request, not frozen at boot", async () => {
@@ -1050,7 +1317,7 @@ await test("region summaries are computed per request, not frozen at boot", asyn
     providers: { cn: undefined, global: undefined },
     shims: { cn: () => "http://127.0.0.1:1", global: () => "http://127.0.0.1:2" },
     scheduler: { status: () => ({ enabled: false }) },
-    state: { get: () => ({}), selection: () => ({}) },
+    state: { get: () => ({}), selection: () => ({}), sanitize: () => ({ enabled: true, brand: true, triggers: true }), fingerprint: () => ({}) },
   };
   const payload = createStatusPayload(deps);
   assert.deepEqual(payload("cn").regions.cn, { total: 1, available: 1, provider: undefined, displayName: undefined, shim: "http://127.0.0.1:1" });

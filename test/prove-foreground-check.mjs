@@ -8,16 +8,25 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = "C:/Users/lenovo/Documents/deepseek-harness/default-workspace/workbuddy-pool";
+/** Resolved from this file, so the proof runs from any checkout or drive. */
+const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/u, "");
 const sandbox = join(ROOT, "_tmpcheck");
 rmSync(sandbox, { recursive: true, force: true });
 mkdirSync(sandbox, { recursive: true });
 
-const source = readFileSync(join(ROOT, "lib/client.js"), "utf8");
-const fixedRule = /\.wbp-btn--primary\{[^}]*\}/u.exec(source)?.[0];
-assert.ok(fixedRule !== undefined, "the primary button rule is not in the stylesheet");
-assert.ok(fixedRule.includes("--dsw-alias-label-primary-foreground"), "the fixed rule does not use the foreground token");
+const source = readFileSync(join(ROOT, "lib", "client.js"), "utf8");
+/**
+ * The primary-button rule, and only that one.
+ *
+ * The switch dot legitimately paints a *background* with the foreground token, so a
+ * plain "find the token" match can land on the wrong rule and the proof would then
+ * rewrite something the check does not care about — which is exactly what happened
+ * when the switch dot was added. Anchor on the rule selector and its `color:`.
+ */
+const fixedRule = /\.wbp-btn--primary\{[^}]*color:var\(--dsw-alias-label-primary-foreground[^}]*\}/u.exec(source)?.[0];
+assert.ok(fixedRule !== undefined, "the primary button rule does not paint its label with the foreground token");
 // Re-introduce the exact historical bug: paint the label with a background token.
 const brokenRule = fixedRule.replace(/color:var\([^}]*\)\}/u, "color:var(--dsw-alias-bg-base)}");
 assert.notEqual(brokenRule, fixedRule, "could not rewrite the rule into the broken form");

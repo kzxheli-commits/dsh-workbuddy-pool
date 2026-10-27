@@ -14,9 +14,11 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = "C:/Users/lenovo/Documents/deepseek-harness/default-workspace/workbuddy-pool";
+/** Resolved from this file, so the proof runs from any checkout or drive. */
+const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/u, "");
 const BACKTICK = String.fromCharCode(96);
 const NEEDLE = ".wbp-btn--primary{background:";
 
@@ -54,10 +56,27 @@ let output = "";
 // Run npm's own CLI through this same node binary. Shelling out to npm.cmd on
 // Windows loses the child's output entirely, which would make the assertion
 // below vacuous; this form keeps stdout/stderr piped and readable.
-const npmCli = [
-  "C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js",
-  "C:/Users/lenovo/AppData/Roaming/npm/node_modules/npm/bin/npm-cli.js",
-].find((candidate) => existsSync(candidate));
+/**
+ * Locate npm's CLI next to the node running this test.
+ *
+ * Derived from `process.execPath` instead of a hard-coded install path, so the proof
+ * works on any machine and does not record where this one keeps its user profile.
+ * A global npm installed beside node lives two levels up from the binary.
+ */
+function findNpmCli() {
+  const execDir = dirname(process.execPath);
+  const candidates = [
+    // npm bundled inside a standard Node installation.
+    join(execDir, "node_modules", "npm", "bin", "npm-cli.js"),
+    join(execDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    // npm installed as a global package (Windows keeps it under %APPDATA%).
+    process.env["APPDATA"] === undefined ? "" : join(process.env["APPDATA"], "npm", "node_modules", "npm", "bin", "npm-cli.js"),
+    process.env["npm_config_prefix"] === undefined ? "" : join(process.env["npm_config_prefix"], "node_modules", "npm", "bin", "npm-cli.js"),
+  ].filter((candidate) => candidate !== "");
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+const npmCli = findNpmCli();
 if (npmCli === undefined) throw new Error("could not locate npm-cli.js next to this node installation");
 
 try {

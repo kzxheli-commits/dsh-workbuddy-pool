@@ -8,8 +8,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = "C:/Users/lenovo/Documents/deepseek-harness/default-workspace/workbuddy-pool";
+/** Resolved from this file, so the proof runs from any checkout or drive. */
+const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/u, "");
 const sandbox = join(ROOT, "_tmpclientcheck");
 rmSync(sandbox, { recursive: true, force: true });
 mkdirSync(sandbox, { recursive: true });
@@ -26,19 +28,16 @@ const broken = source.replace(
 assert.notEqual(broken, source, "could not inject the broken comment");
 writeFileSync(join(sandbox, "client.js"), broken, "utf8");
 
-const checker = readFileSync(join(ROOT, "test/check-client-loads.mjs"), "utf8");
-writeFileSync(
-  join(sandbox, "check.mjs"),
-  checker
-    .replace(/^const ROOT = .*$/mu, `const ROOT = ${JSON.stringify(sandbox)};`)
-    .replace('join(ROOT, "lib", "client.js")', 'join(ROOT, "client.js")'),
-  "utf8",
-);
+const checker = join(ROOT, "test", "check-client-loads.mjs");
+const brokenPath = join(sandbox, "client.js");
 
 let failed = false;
 let output = "";
 try {
-  output = execFileSync(process.execPath, [join(sandbox, "check.mjs")], { encoding: "utf8", stdio: "pipe" });
+  // The gate takes the bundle to inspect as its first argument, so the proof hands
+  // it the broken copy instead of rewriting the checker's source. (Rewriting source
+  // was how this proof silently stopped testing anything when the gate changed.)
+  output = execFileSync(process.execPath, [checker, brokenPath], { encoding: "utf8", stdio: "pipe" });
 } catch (error) {
   failed = true;
   output = `${error.stdout ?? ""}${error.stderr ?? ""}`;

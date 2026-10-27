@@ -84,6 +84,9 @@ check("every client route exists on the server", () => {
     "automationConfig",
     "automationRun",
     "disableAccount",
+    "fingerprintConfig",
+    "fingerprintRotate",
+    "fingerprintSet",
     "importAccount",
     "oauthPoll",
     "oauthStart",
@@ -94,6 +97,7 @@ check("every client route exists on the server", () => {
     "rescan",
     "reserveAccount",
     "resetCooldowns",
+    "sanitizeConfig",
     "saveModels",
     "status",
   ]);
